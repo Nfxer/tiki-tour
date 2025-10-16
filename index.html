@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<title>Tiki Tour</title>
+<title>Tiki Tour — Smart Time Search</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
@@ -31,8 +31,8 @@
   .coconut { width:46px;height:46px;border-radius:50%;border:4px solid rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:center; animation:coconutSpin 1500ms linear infinite; }
   @keyframes coconutSpin{from{transform:rotate(0deg);}to{transform:rotate(360deg);} }
 
-  /* app shell */
-  #app { max-width:1000px;margin:12vh auto 48px;padding:12px;box-sizing:border-box; }
+  /* shell */
+  #app { max-width:1000px;margin:12vh auto 48px;padding:12px;box-sizing:border-box;}
   .card { background:var(--card); border-radius:14px; box-shadow:var(--shadow); overflow:hidden; padding:0; -webkit-backdrop-filter: blur(6px); }
   #map { width:100%; height:64vh; min-height:420px; display:block; border-radius:12px 12px 0 0; }
 
@@ -46,6 +46,7 @@
   .btn.ghost { background:transparent; color:var(--text); border:1px solid rgba(0,0,0,0.06); }
   .btn:active { transform: translateY(2px); box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
 
+  .statusRow { width:100%; padding:8px 14px 12px 14px; color:var(--muted); font-size:13px; display:flex; gap:10px; align-items:center; }
   .stats { padding:8px 14px 18px 14px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;}
   .pill { background: linear-gradient(90deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)); padding:8px 12px; border-radius:999px; font-weight:700; color:var(--text); }
 
@@ -62,7 +63,6 @@
 </head>
 <body>
 
-<!-- Splash -->
 <div id="splash" aria-hidden="false">
   <div class="tiki"><div class="tiki-emoji">🌺</div></div>
   <div class="splash-title">
@@ -79,7 +79,6 @@
   <div id="map"></div>
 
   <div class="controls">
-    <!-- Mode Option A: By Distance / By Time -->
     <div class="input">
       <label class="small">Mode</label>
       <select id="modeSelect" aria-label="Mode: By Distance or By Time">
@@ -89,13 +88,13 @@
     </div>
 
     <div class="input">
-      <label class="small" for="kmInput">Distance km (one-way target)</label>
-      <input id="kmInput" type="number" step="0.1" min="0.1" value="30" />
+      <label class="small" for="kmInput">Distance km (one-way)</label>
+      <input id="kmInput" type="number" step="0.1" min="0.1" value="15" />
     </div>
 
     <div class="input">
       <label class="small" for="timeInput">Time min (total)</label>
-      <input id="timeInput" type="number" step="1" min="5" value="60" />
+      <input id="timeInput" type="number" step="1" min="5" value="20" />
     </div>
 
     <div class="input">
@@ -122,9 +121,14 @@
     <div id="status" style="margin-left:auto;color:var(--muted);font-size:14px">Waiting for location.</div>
   </div>
 
+  <div class="statusRow">
+    <div id="progress" style="flex:1;color:var(--muted);font-size:13px">Idle.</div>
+    <div id="attempts" style="color:var(--muted);font-size:13px"></div>
+  </div>
+
   <div class="stats">
     <div id="routeInfo" class="pill">No route selected</div>
-    <div style="color:var(--muted);font-size:13px">Tip: distance input is one-way target. If "Return Trip" is chosen we aim to double the time/distance unless using time mode when we split the total.</div>
+    <div style="color:var(--muted);font-size:13px">Using highway speed 100 km/h first, then 60 km/h if needed. Tolerance ±10%.</div>
   </div>
 
 </div>
@@ -138,97 +142,84 @@
 
 <script>
 /*
-  Full file implementing:
-  - Mode: By Distance / By Time (Option A)
-  - Return trip support (splits time by two when searching by time)
-  - Mobile deep-links to Apple / Google / Waze with web fallback
-  - Avoids selecting points across NZ islands (basic lat filter)
-  - Uses OSRM nearest & route endpoints
+  Smart time-search version.
+  Uses highway speed 100 km/h then normal roads 60 km/h fallback.
+  Iteratively adjusts radius to home in on desired one-way time (±10%).
 */
 
 const splash = document.getElementById('splash');
 const statusEl = document.getElementById('status');
+const progressEl = document.getElementById('progress');
+const attemptsEl = document.getElementById('attempts');
+
 const kmInput = document.getElementById('kmInput');
 const timeInput = document.getElementById('timeInput');
 const modeSelect = document.getElementById('modeSelect');
 const tripTypeSelect = document.getElementById('tripType');
 const mapAppSelect = document.getElementById('mapApp');
+
 const pickBtn = document.getElementById('pickBtn');
 const openMapsBtn = document.getElementById('openMapsBtn');
 const clearBtn = document.getElementById('clearBtn');
 const routeInfo = document.getElementById('routeInfo');
 const monkey = document.getElementById('monkeyEmoji');
 
-let userCoords = null;
-let userMarker = null;
-let destMarker = null;
-let routeLayer = null;
-let snappedDest = null;
-let lastFoundRoute = null;
+let userCoords = null, userMarker = null, destMarker = null, routeLayer = null, snappedDest = null, lastFoundRoute = null;
 
-const map = L.map('map', { zoomControl: true }).setView([0,0], 2);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19, attribution: '© OpenStreetMap contributors'
-}).addTo(map);
+const HIGHWAY_SPEED = 100; // km/h (user-specified)
+const NORMAL_SPEED = 60;   // km/h (user-specified)
+const TOLERANCE = 0.10;    // ±10%
+const MAX_TRIES = 40;
+
+const map = L.map('map', { zoomControl:true }).setView([0,0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'© OpenStreetMap contributors'}).addTo(map);
 
 function hideSplash(){ if(!splash) return; splash.style.opacity='0'; splash.style.transform='scale(0.98)'; setTimeout(()=> { if(splash) splash.remove(); }, 520); }
 function setStatus(t){ statusEl.textContent = t || ''; }
+function setProgress(t){ progressEl.textContent = t || ''; }
+function setAttempts(t){ attemptsEl.textContent = t || ''; }
 
-// Attempt to get location once then keep updates small
+// initial location
 function enableLocation(){
-  if (!navigator.geolocation) { setStatus('Location not supported by browser.'); return; }
+  if(!navigator.geolocation){ setStatus('Location not supported by browser.'); return; }
   setStatus('Locating you.');
-  navigator.geolocation.getCurrentPosition(pos => {
+  navigator.geolocation.getCurrentPosition(pos=>{
     userCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
     setStatus('');
-    if (userMarker) userMarker.remove();
-    userMarker = L.marker([userCoords.lat, userCoords.lon], { title: 'You' }).addTo(map);
+    if(userMarker) userMarker.remove();
+    userMarker = L.marker([userCoords.lat, userCoords.lon], { title:'You' }).addTo(map);
     map.setView([userCoords.lat, userCoords.lon], 13);
     hideSplash();
-  }, err => {
-    console.error(err);
-    setStatus('Allow location in browser and reload.');
-  }, { enableHighAccuracy:true, maximumAge:15000, timeout:12000 });
+  }, err => { console.error(err); setStatus('Allow location in browser and reload.'); }, { enableHighAccuracy:true, maximumAge:15000, timeout:12000 });
 }
 enableLocation();
-
-setInterval(() => {
-  if (!document.hidden && navigator.geolocation) {
+setInterval(()=> {
+  if(!document.hidden && navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(pos => {
       userCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-      if (userMarker) userMarker.setLatLng([userCoords.lat, userCoords.lon]);
-    }, () => {}, { enableHighAccuracy:true, maximumAge:20000 });
+      if(userMarker) userMarker.setLatLng([userCoords.lat, userCoords.lon]);
+    }, ()=>{}, { enableHighAccuracy:true, maximumAge:20000 });
   }
 }, 8000);
 
-// Small UI behavior: when mode changes disable irrelevant input
-function updateModeUI() {
-  if (modeSelect.value === 'distance') {
-    kmInput.disabled = false;
-    timeInput.disabled = true;
-    timeInput.style.opacity = '0.6';
-    kmInput.style.opacity = '1';
-  } else {
-    kmInput.disabled = true;
-    timeInput.disabled = false;
-    timeInput.style.opacity = '1';
-    kmInput.style.opacity = '0.6';
-  }
+// UI mode toggling: disable irrelevant input
+function updateModeUI(){
+  if(modeSelect.value === 'distance'){ kmInput.disabled=false; kmInput.style.opacity='1'; timeInput.disabled=true; timeInput.style.opacity='0.6'; }
+  else { kmInput.disabled=true; kmInput.style.opacity='0.6'; timeInput.disabled=false; timeInput.style.opacity='1'; }
 }
 modeSelect.addEventListener('change', updateModeUI);
 updateModeUI();
 
-// --- island check (rough) to avoid picking a point in other island ---
-// These are rough lat boundaries: north island roughly above -41.6 lat
+// --- island check (rough) ---
 const NORTH_ISLAND_MIN_LAT = -41.6;
-function isSameIsland(latA, latB) {
+function isSameIsland(latA, latB){
   const aNorth = latA > NORTH_ISLAND_MIN_LAT;
   const bNorth = latB > NORTH_ISLAND_MIN_LAT;
   return (aNorth && bNorth) || (!aNorth && !bNorth);
 }
 
 // --- geospatial helpers ---
-function randomCoordinate(centerLat, centerLon, maxMeters) {
+function randomCoordinate(centerLat, centerLon, maxMeters){
   const R = 6371000;
   const r = Math.sqrt(Math.random()) * maxMeters;
   const bearing = Math.random() * Math.PI * 2;
@@ -239,71 +230,60 @@ function randomCoordinate(centerLat, centerLon, maxMeters) {
   return { lat: lat2 * 180 / Math.PI, lon: lon2 * 180 / Math.PI };
 }
 
-async function snapToRoad(lon, lat) {
+async function snapToRoad(lon, lat){
   try {
     const url = `https://router.project-osrm.org/nearest/v1/driving/${lon},${lat}?number=1`;
     const res = await fetch(url);
-    if (!res.ok) return null;
+    if(!res.ok) return null;
     const j = await res.json();
-    if (j && j.waypoints && j.waypoints.length) {
+    if(j && j.waypoints && j.waypoints.length){
       const wp = j.waypoints[0];
       return { lat: wp.location[1], lon: wp.location[0] };
     }
-  } catch (e) { console.error('snap error', e); }
+  } catch(e) { console.error('snap error',e); }
   return null;
 }
 
-async function getRoute(user, dest) {
+async function getRoute(user, dest){
   try {
     const coords = `${user.lon},${user.lat};${dest.lon},${dest.lat}`;
     const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
     const res = await fetch(url);
-    if (!res.ok) return null;
+    if(!res.ok) return null;
     const j = await res.json();
-    if (j && j.routes && j.routes.length) return j.routes[0];
-  } catch (e) { console.error('route error', e); }
+    if(j && j.routes && j.routes.length) return j.routes[0];
+  } catch(e) { console.error('route error', e); }
   return null;
 }
 
-// show route on map
-function showRoute(foundRoute, snapped) {
-  if (destMarker) destMarker.remove();
-  if (routeLayer) routeLayer.remove();
+function showRoute(foundRoute, snapped){
+  if(destMarker) destMarker.remove();
+  if(routeLayer) routeLayer.remove();
 
-  destMarker = L.marker([snapped.lat, snapped.lon], { title: 'Destination' }).addTo(map);
+  destMarker = L.marker([snapped.lat, snapped.lon], { title:'Destination' }).addTo(map);
   destMarker._icon && destMarker._icon.classList.add('drop-pin');
 
   const coords = foundRoute.geometry.coordinates.map(c => [c[1], c[0]]);
-  routeLayer = L.polyline(coords, { color: '#ff8833', weight: 5, opacity: 0.95 }).addTo(map);
+  routeLayer = L.polyline(coords, { color:'#ff8833', weight:5, opacity:0.95 }).addTo(map);
 
   // fit bounds
   const bounds = L.latLngBounds([[userCoords.lat, userCoords.lon], [snapped.lat, snapped.lon]]);
-  map.fitBounds(bounds.pad(0.4), { animate: true, duration: 0.9 });
+  map.fitBounds(bounds.pad(0.4), { animate:true, duration:0.9 });
 
   const distKm = (foundRoute.distance / 1000);
   const mins = Math.round(foundRoute.duration / 60);
   const tripType = tripTypeSelect.value;
 
-  // compute displayed totals:
-  let displayKm, displayMins;
-  if (modeSelect.value === 'distance') {
-    displayKm = tripType === 'return' ? (distKm * 2).toFixed(2) : distKm.toFixed(2);
-    displayMins = tripType === 'return' ? Math.round(mins * 2) : mins;
-  } else {
-    // mode=time -> route.duration is one-way candidate
-    displayKm = tripType === 'return' ? (distKm * 2).toFixed(2) : distKm.toFixed(2);
-    displayMins = tripType === 'return' ? Math.round(mins * 2) : mins;
-  }
+  const displayKm = tripType === 'return' ? (distKm * 2).toFixed(2) : distKm.toFixed(2);
+  const displayMins = tripType === 'return' ? Math.round(mins * 2) : mins;
 
   routeInfo.textContent = `${tripType === 'return' ? 'Return trip' : 'One way'}: ${displayKm} km, approx ${displayMins} min`;
   lastFoundRoute = foundRoute;
   snappedDest = snapped;
 }
 
-// --- Deep-link URLs (app) + web fallback URLs ---
-// build app-specific deep links and web fallbacks
-function deepAndWebUrl(app, from, to) {
-  // from {lat,lon}, to {lat,lon}
+// --- deep link builder (app + web fallback) ---
+function deepAndWebUrl(app, from, to){
   const appleDeep = `maps://?saddr=${from.lat},${from.lon}&daddr=${to.lat},${to.lon}`;
   const appleWeb  = `https://maps.apple.com/?saddr=${from.lat},${from.lon}&daddr=${to.lat},${to.lon}&dirflg=d`;
 
@@ -321,208 +301,259 @@ function deepAndWebUrl(app, from, to) {
   }[app];
 }
 
-// open in app if mobile, otherwise open web
-function openMaps(appChoice, from, to) {
+function openMaps(appChoice, from, to){
   const urls = deepAndWebUrl(appChoice, from, to);
-
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
   const isAndroid = /Android/i.test(navigator.userAgent);
   const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-  if (!isMobile) {
-    // Desktop: open web
-    if (appChoice === 'google') window.open(urls.web, '_blank');
-    else if (appChoice === 'waze') window.open(urls.web, '_blank');
-    else window.open(urls.web, '_blank'); // apple web works cross-platform
+  if(!isMobile){
+    // Desktop: open web fallback
+    if(appChoice === 'google') window.open(urls.web, '_blank');
+    else if(appChoice === 'waze') window.open(urls.web, '_blank');
+    else window.open(urls.web, '_blank');
     return;
   }
 
-  // Mobile attempt: try deep link first, fallback to web after short delay if page still visible
-  let triedDeep = false;
   let deepUrl = urls.web;
-  if (appChoice === 'apple') {
-    if (isIOS) deepUrl = urls.deep;
-    else deepUrl = urls.web; // Apple Maps deep link generally only works on iOS
-  } else if (appChoice === 'google') {
-    if (isIOS) deepUrl = urls.deep_ios;
-    if (isAndroid) deepUrl = urls.deep_android_intent; // intent better on Android
-  } else if (appChoice === 'waze') {
+  if(appChoice === 'apple'){
+    deepUrl = isIOS ? urls.deep : urls.web;
+  } else if(appChoice === 'google'){
+    deepUrl = isAndroid ? urls.deep_android_intent : urls.deep_ios;
+  } else if(appChoice === 'waze'){
     deepUrl = urls.deep;
   }
 
-  // Try deep link. Use visibility API to detect if app opened (page hidden). If not hidden after timeout, open web URL.
-  triedDeep = true;
-  const start = Date.now();
-  // attempt navigation
   try {
     window.location.href = deepUrl;
-  } catch (e) {
-    // if setting href failed, fallback to web
-    if (appChoice === 'google') window.location.href = urls.web;
-    else if (appChoice === 'waze') window.location.href = urls.web;
+  } catch(e){
+    // fallback
+    if(appChoice === 'google') window.location.href = urls.web;
+    else if(appChoice === 'waze') window.location.href = urls.web;
     else window.location.href = urls.web;
     return;
   }
 
-  // fallback trigger: if user didn't leave page in 1 second, open web url
-  const fallback = () => {
+  // fallback: if still visible after 1s, open web
+  setTimeout(() => {
     if (!document.hidden) {
-      // still visible: deep link probably did not open the app
-      if (appChoice === 'google') {
-        // if android deep intent didn't open, fall back to web
-        window.location.href = urls.web;
-      } else if (appChoice === 'waze') {
-        window.location.href = urls.web;
-      } else {
-        window.location.href = urls.web;
-      }
+      if (appChoice === 'google') window.location.href = urls.web;
+      else if (appChoice === 'waze') window.location.href = urls.web;
+      else window.location.href = urls.web;
     }
-  };
-  setTimeout(fallback, 1000);
+  }, 1000);
 }
 
-// --- Main pick logic ---
-// Tolerances: +-10%
-const TOLERANCE = 0.10;
-
-// Attempt count
-const MAX_TRIES = 40;
-
-// Helper: distance km tolerance check
-function withinTolerance(target, actual) {
+// helper tolerance checks
+function withinTolerance(target, actual){
   const low = target * (1 - TOLERANCE);
   const high = target * (1 + TOLERANCE);
   return actual >= low && actual <= high;
 }
 
+// --- main pick logic with smart time radius search ---
 pickBtn.addEventListener('click', async () => {
-  if (!userCoords) { setStatus('Waiting for location.'); return; }
-  pickBtn.disabled = true;
-  openMapsBtn.disabled = true;
+  if(!userCoords){ setStatus('Waiting for location.'); return; }
+  pickBtn.disabled = true; openMapsBtn.disabled = true;
   setStatus('Searching for a route...');
+  setProgress('Starting search...');
+  setAttempts('');
   routeInfo.textContent = 'Searching...';
   monkey.style.transform = 'translateY(-6px) scale(1.08)';
 
   const mode = modeSelect.value; // 'distance' or 'time'
   const tripType = tripTypeSelect.value; // 'oneway' or 'return'
-  const kmTargetInput = Math.max(0.1, parseFloat(kmInput.value) || 5);
-  const timeTotalInput = Math.max(5, parseFloat(timeInput.value) || 30); // total minutes if time mode
-
-  // interpret targets:
-  // distance mode -> kmTargetInput is one-way target (user wanted one-way)
-  // time mode -> timeTotalInput is total (if return selected we split in half per leg)
   const isReturn = tripType === 'return';
+  const distanceOneWayTargetKm = Math.max(0.1, parseFloat(kmInput.value) || 5);
+  const timeTotalMin = Math.max(5, parseFloat(timeInput.value) || 20);
 
-  // compute one-way targets used for matching:
-  let targetOneWayKm;
-  let targetOneWayMin;
-
-  if (mode === 'distance') {
-    targetOneWayKm = kmTargetInput;
-    // no direct time target in distance mode; we'll accept any time, display ETA later
-  } else {
-    if (isReturn) targetOneWayMin = (timeTotalInput / 2);
-    else targetOneWayMin = timeTotalInput;
+  // time mode => determine one-way target minutes
+  let targetOneWayMin = null;
+  if(mode === 'time'){
+    targetOneWayMin = isReturn ? (timeTotalMin / 2) : timeTotalMin;
   }
 
-  const maxMeters = Math.max(200, (mode === 'distance' ? kmTargetInput * 1000 : 50000));
+  // base radius guess in meters: use speed * time
+  // We'll try highway speed first (100 km/h), then normal (60 km/h) if needed.
+  const highwaySpeed = HIGHWAY_SPEED;
+  const normalSpeed = NORMAL_SPEED;
+
+  // candidate search loop parameters
   let foundRoute = null;
   let foundSnapped = null;
 
-  for (let i=0; i<MAX_TRIES; i++) {
-    setStatus(`Trying point ${i+1} of ${MAX_TRIES}...`);
-    // pick random candidate at radius up to maxMeters (we vary radius a bit to diversify)
-    const radius = maxMeters * (0.4 + Math.random() * 0.6);
-    const cand = randomCoordinate(userCoords.lat, userCoords.lon, radius);
-    const snapped = await snapToRoad(cand.lon, cand.lat);
-    if (!snapped) continue;
-
-    // island check (avoid choosing across islands)
-    if (!isSameIsland(userCoords.lat, snapped.lat)) continue;
-
-    // compute approximate straight-line distance to avoid tiny picks
-    const dx = (snapped.lat - userCoords.lat);
-    const dy = (snapped.lon - userCoords.lon);
-    const approxDist = Math.sqrt(dx*dx + dy*dy) * 111000;
-    if (approxDist < 30) continue;
-
-    const route = await getRoute(userCoords, snapped);
-    if (!route) continue;
-
-    // route.distance (meters) route.duration (seconds) are one-way
-    const routeKm = route.distance / 1000;
-    const routeMin = route.duration / 60;
-
-    // Requirements
-    let ok = false;
-    if (mode === 'distance') {
-      // aim for targetOneWayKm within tolerance
-      if (withinTolerance(targetOneWayKm, routeKm)) ok = true;
-      // If return selected, routeKm doubled should be within tolerance of total target? we used one-way input so ok this way.
-      // Also allow slightly longer/shorter routes if user set large maxMeters
-    } else {
-      // time mode: routeMin should be approx targetOneWayMin within tolerance
-      if (withinTolerance(targetOneWayMin, routeMin)) ok = true;
+  // If distance mode: simpler randomized attempts, but still iterative with radius envelope.
+  if(mode === 'distance'){
+    const targetMeters = distanceOneWayTargetKm * 1000;
+    const maxRadius = Math.max(2000, targetMeters * 1.6); // envelope
+    let tries = 0;
+    while(tries < MAX_TRIES && !foundRoute){
+      tries++;
+      setAttempts(`Attempt ${tries}/${MAX_TRIES}`);
+      // radius choose: bias around targetMeters with jitter
+      const radius = Math.min(maxRadius, Math.max(500, targetMeters * (0.6 + Math.random() * 1.4)));
+      setProgress(`Trying ${ (radius/1000).toFixed(1) } km radius (distance mode) — attempt ${tries}`);
+      const cand = randomCoordinate(userCoords.lat, userCoords.lon, radius);
+      const snapped = await snapToRoad(cand.lon, cand.lat);
+      if(!snapped) { await new Promise(r=>setTimeout(r,80)); continue; }
+      if(!isSameIsland(userCoords.lat, snapped.lat)) { await new Promise(r=>setTimeout(r,80)); continue; }
+      const route = await getRoute(userCoords, snapped);
+      if(!route) { await new Promise(r=>setTimeout(r,80)); continue; }
+      const routeKm = route.distance / 1000;
+      if(withinTolerance(distanceOneWayTargetKm, routeKm)){
+        foundRoute = route;
+        foundSnapped = snapped;
+        break;
+      }
+      await new Promise(r=>setTimeout(r, 120 + Math.random()*120));
     }
+  } else {
+    // TIME MODE: iterative radius adjustments. Start with highway speed estimate.
+    // compute initial radius meters from speed and targetOneWayMin
+    let attempt = 0;
+    let usingSpeed = highwaySpeed;
+    let attemptsAtThisSpeed = 0;
+    let radius = Math.max(1000, (usingSpeed * (targetOneWayMin / 60)) * 1000);
+    // clamp radius
+    const MAX_RADIUS = 150000; // 150 km cap
+    const MIN_RADIUS = 800; // 0.8 km
+    while(attempt < MAX_TRIES && !foundRoute){
+      attempt++;
+      attemptsAtThisSpeed++;
+      setAttempts(`Attempt ${attempt}/${MAX_TRIES}`);
+      // Jitter radius a bit to explore nearby
+      const jitterFactor = 0.7 + Math.random() * 0.6; // 0.7 - 1.3
+      const trialRadius = Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, radius * jitterFactor));
+      setProgress(`Trying ${ (trialRadius/1000).toFixed(1) } km radius (attempt ${attempt}) — using ${usingSpeed === highwaySpeed ? 'highway' : 'normal'} speed`);
+      const cand = randomCoordinate(userCoords.lat, userCoords.lon, trialRadius);
+      const snapped = await snapToRoad(cand.lon, cand.lat);
+      if(!snapped) { await new Promise(r=>setTimeout(r,80)); continue; }
+      if(!isSameIsland(userCoords.lat, snapped.lat)) { await new Promise(r=>setTimeout(r,80)); continue; }
+      const route = await getRoute(userCoords, snapped);
+      if(!route) { await new Promise(r=>setTimeout(r,80)); continue; }
 
-    // Also enforce upper time limit: if user gave a total time and route would exceed (for safety)
-    // We'll calculate totalDuration depending on tripType
-    let totalDurationSecs = route.duration;
-    if (isReturn) totalDurationSecs *= 2;
+      const routeMin = route.duration / 60; // one-way minutes
+      // check within tolerance
+      if(withinTolerance(targetOneWayMin, routeMin)){
+        foundRoute = route;
+        foundSnapped = snapped;
+        break;
+      }
 
-    const userTimeLimitSecs = (mode === 'time') ? (timeTotalInput * 60) : (60 * 60 * 6); // if not time mode, allow up to 6 hours total
-    if (totalDurationSecs > userTimeLimitSecs * (1 + 0.25)) {
-      // route would exceed time limit by big margin, skip
-      ok = false;
-    }
+      // adjust radius intelligently:
+      // If routeMin < targetOneWayMin => need larger radius (route too short) => increase radius
+      // If routeMin > targetOneWayMin => need smaller radius (route too long) => decrease radius
+      const ratio = targetOneWayMin / Math.max(0.1, routeMin);
+      // Soft adjust radius by geometric mean factor but cap changes
+      const factor = Math.min(2, Math.max(0.5, 0.9 * ratio + 0.1));
+      radius = Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, radius * factor));
 
-    if (ok) {
-      foundRoute = route;
-      foundSnapped = snapped;
-      break;
-    }
+      // If we've tried many times using highway speed without success, switch to normal speed to consider twisty/slow roads
+      if(attemptsAtThisSpeed >= 8 && usingSpeed === highwaySpeed){
+        usingSpeed = normalSpeed;
+        attemptsAtThisSpeed = 0;
+        // recompute radius from new speed baseline
+        radius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, (usingSpeed * (targetOneWayMin / 60)) * 1000));
+      }
 
-    // small delay to avoid hammering
-    await new Promise(r => setTimeout(r, 120 + Math.random()*200));
-  }
+      // slight delay
+      await new Promise(r=>setTimeout(r, 140 + Math.random()*180));
+    } // end time-mode loop
+  } // end else time mode
 
-  if (!foundRoute) {
-    setStatus('Could not find a suitable drivable road within that search. Try increasing time/distance or try again.');
+  // finalize
+  if(!foundRoute){
+    setStatus('No suitable route found. Try increasing time/distance or allow a wider tolerance.');
+    setProgress('Search finished: no match.');
     routeInfo.textContent = 'No route found';
-    pickBtn.disabled = false;
-    monkey.style.transform = '';
+    pickBtn.disabled = false; monkey.style.transform = '';
     return;
   }
 
-  // Found route: show on map
+  // success
   showRoute(foundRoute, foundSnapped);
-  setStatus('');
+  setStatus('Found a route!');
+  setProgress('Done.');
+  setAttempts('');
   openMapsBtn.disabled = false;
   pickBtn.disabled = false;
   monkey.style.transform = '';
 });
 
-// Open maps button: use deep link on mobile with fallback
+// open maps
+function deepAndWebUrl(app, from, to){
+  const appleDeep = `maps://?saddr=${from.lat},${from.lon}&daddr=${to.lat},${to.lon}`;
+  const appleWeb  = `https://maps.apple.com/?saddr=${from.lat},${from.lon}&daddr=${to.lat},${to.lon}&dirflg=d`;
+
+  const googleDeepIOS = `comgooglemaps://?saddr=${from.lat},${from.lon}&daddr=${to.lat},${to.lon}&travelmode=driving`;
+  const googleDeepAndroidIntent = `intent://maps.google.com/maps?f=d&daddr=${to.lat},${to.lon}&saddr=${from.lat},${from.lon}&dirflg=d#Intent;scheme=https;package=com.google.android.apps.maps;end`;
+  const googleWeb = `https://www.google.com/maps/dir/?api=1&origin=${from.lat},${from.lon}&destination=${to.lat},${to.lon}&travelmode=driving`;
+
+  const wazeDeep = `waze://?ll=${to.lat},${to.lon}&navigate=yes`;
+  const wazeWeb  = `https://waze.com/ul?ll=${to.lat},${to.lon}&navigate=yes`;
+
+  return {
+    apple: { deep: appleDeep, web: appleWeb },
+    google: { deep_ios: googleDeepIOS, deep_android_intent: googleDeepAndroidIntent, web: googleWeb },
+    waze: { deep: wazeDeep, web: wazeWeb }
+  }[app];
+}
+
+function openMaps(appChoice, from, to){
+  const urls = deepAndWebUrl(appChoice, from, to);
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  if(!isMobile){
+    // desktop fallback -> open web
+    if(appChoice === 'google') window.open(urls.web, '_blank');
+    else if(appChoice === 'waze') window.open(urls.web, '_blank');
+    else window.open(urls.web, '_blank');
+    return;
+  }
+
+  let deepUrl = urls.web;
+  if(appChoice === 'apple'){
+    deepUrl = isIOS ? urls.deep : urls.web;
+  } else if(appChoice === 'google'){
+    deepUrl = isAndroid ? urls.deep_android_intent : urls.deep_ios;
+  } else if(appChoice === 'waze'){
+    deepUrl = urls.deep;
+  }
+
+  try { window.location.href = deepUrl; } catch(e) {
+    if(appChoice === 'google') window.location.href = urls.web;
+    else if(appChoice === 'waze') window.location.href = urls.web;
+    else window.location.href = urls.web;
+    return;
+  }
+  setTimeout(()=> {
+    if(!document.hidden) {
+      if(appChoice === 'google') window.location.href = urls.web;
+      else if(appChoice === 'waze') window.location.href = urls.web;
+      else window.location.href = urls.web;
+    }
+  }, 1000);
+}
+
 openMapsBtn.addEventListener('click', () => {
-  if (!userCoords || !snappedDest) return;
+  if(!userCoords || !snappedDest) return;
   openMaps(mapAppSelect.value, userCoords, snappedDest);
 });
 
-// Clear
 clearBtn.addEventListener('click', () => {
-  if (destMarker) destMarker.remove();
-  if (routeLayer) routeLayer.remove();
+  if(destMarker) destMarker.remove();
+  if(routeLayer) routeLayer.remove();
   destMarker = null; routeLayer = null; snappedDest = null; lastFoundRoute = null;
-  routeInfo.textContent = 'No route selected';
-  setStatus('');
-  openMapsBtn.disabled = true;
+  routeInfo.textContent = 'No route selected'; setStatus(''); setProgress('Idle.'); setAttempts(''); openMapsBtn.disabled = true;
 });
 
-// UX: remove splash after some time if permission denied
-setTimeout(() => { if (splash) hideSplash(); }, 7000);
+// cleanup splash
+setTimeout(()=> hideSplash(), 7000);
 
-// quick monkey wiggle
-document.querySelector('.mascot-bubble').addEventListener('click', () => {
+// monkey wiggle
+document.querySelector('.mascot-bubble').addEventListener('click',()=>{
   monkey.style.transition = 'transform 220ms';
   monkey.style.transform = 'translateY(-10px) rotate(-8deg)';
   setTimeout(()=> monkey.style.transform = '', 420);

@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>Tiki Tour</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+<style>
+  :root{
+    --bg:#fff;
+    --card:#f8f8f8;
+    --text:#111;
+    --muted:#666;
+    --accent:#ff8833;
+    --accent-2:#32c48d;
+    --shadow: 0 8px 24px rgba(10,10,10,0.08);
+    --glass: rgba(255,255,255,0.6);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root{
+      --bg: #081018;
+      --card: rgba(12,18,24,0.7);
+      --text: #e9f5ef;
+      --muted: #9fb3a6;
+      --accent:#ffb06b;
+      --accent-2:#4bedb3;
+      --shadow: 0 10px 30px rgba(0,0,0,0.6);
+      --glass: rgba(6,8,10,0.5);
+    }
+  }
+
+  html,body{height:100%;margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial; background: linear-gradient(180deg, rgba(255,241,224,0.3), transparent 40%), var(--bg); color:var(--text); -webkit-font-smoothing:antialiased;}
+  /* subtle beach gradient overlay for light mode only */
+  @media (prefers-color-scheme: light) {
+    body{background: linear-gradient(180deg, #fff8f0, #f7fbf9 60%), var(--bg);}
+  }
+
+  /* splash */
+  #splash {
+    position:fixed; inset:0; z-index:9999; display:flex; align-items:center; justify-content:center;
+    background: linear-gradient(135deg, rgba(3,91,70,0.95), rgba(19,53,57,0.95));
+    color: white; flex-direction:column; gap:18px;
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  }
+  .splash-title { font-size:28px; font-weight:800; letter-spacing:0.6px; display:flex; align-items:center; gap:12px; }
+  .tiki {
+    width:86px; height:86px; border-radius:18px; background:linear-gradient(180deg,#ffe1b9,#ffd59a); display:flex; align-items:center; justify-content:center;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.35); transform: rotate(-6deg);
+  }
+  .tiki-emoji { font-size:46px; transform: translateY(6px); }
+
+  /* loading coconut circle */
+  .coconut {
+    width:46px; height:46px; border-radius:50%; border:4px solid rgba(255,255,255,0.12); display:flex; align-items:center; justify-content:center;
+    animation: coconutSpin 1500ms linear infinite;
+  }
+  @keyframes coconutSpin { from { transform: rotate(0deg);} to { transform: rotate(360deg); } }
+
+  /* app shell */
+  #app {
+    max-width:1000px; margin: 12vh auto 48px; padding: 12px; box-sizing:border-box;
+  }
+
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    -webkit-backdrop-filter: blur(6px);
+    padding:0;
+  }
+
+  /* map */
+  #map { width:100%; height:64vh; min-height:420px; display:block; border-radius:12px 12px 0 0; }
+
+  /* controls */
+  .controls {
+    display:flex; gap:10px; padding:14px; align-items:center; flex-wrap:wrap;
+  }
+  .input {
+    display:flex; gap:8px; align-items:center;
+  }
+  label.small { font-size:13px; color:var(--muted); margin-right:6px; }
+  input[type="number"] {
+    width:110px; padding:10px 12px; border-radius:10px; border:1px solid rgba(0,0,0,0.06);
+    background: transparent; color:var(--text); font-size:16px; outline:none;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+  }
+  @media (prefers-color-scheme: dark) {
+    input[type="number"]{ border:1px solid rgba(255,255,255,0.04); }
+  }
+
+  .btn {
+    padding:10px 14px; font-weight:700; border-radius:12px; border:none; cursor:pointer; font-size:15px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+    background: linear-gradient(180deg,var(--accent), color-mix(in srgb, var(--accent) 85%, black 8%));
+    color: #062014;
+    display:inline-flex; align-items:center; gap:8px;
+    transition: transform 180ms ease, box-shadow 180ms ease;
+  }
+  .btn:active { transform: translateY(2px); box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+  .btn.ghost { background:transparent; color:var(--text); border:1px solid rgba(0,0,0,0.06); }
+
+  .meta { padding:12px 14px; color:var(--muted); font-size:14px; }
+
+  .stats { padding: 8px 14px 18px 14px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .pill { background: linear-gradient(90deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)); padding:8px 12px; border-radius:999px; font-weight:700; color:var(--text); }
+
+  /* monkey mascot */
+  .mascot {
+    position: fixed; right:14px; bottom:18vh; z-index:900; display:flex; align-items:center; gap:10px;
+    pointer-events: none;
+  }
+  .monkey {
+    font-size:38px; transform-origin:center; display:inline-block;
+    animation: monkeyDance 1600ms ease-in-out infinite;
+    filter: drop-shadow(0 8px 18px rgba(0,0,0,0.25));
+  }
+  .mascot-bubble {
+    background: var(--glass); padding:8px 10px; border-radius: 999px; font-weight:700; color:var(--text); font-size:14px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    pointer-events:none;
+  }
+  @keyframes monkeyDance {
+    0% { transform: translateY(0) rotate(-6deg) scale(1); }
+    25% { transform: translateY(-6px) rotate(6deg) scale(1.06); }
+    50% { transform: translateY(0px) rotate(-4deg) scale(1); }
+    75% { transform: translateY(-4px) rotate(8deg) scale(1.03); }
+    100% { transform: translateY(0) rotate(-6deg) scale(1); }
+  }
+
+  /* little pop for pin */
+  .drop-pin {
+    animation: dropPin 540ms cubic-bezier(.2,.9,.2,1) both;
+  }
+  @keyframes dropPin {
+    0% { transform: translateY(-200px) scale(0.8); opacity:0; }
+    60% { transform: translateY(16px) scale(1.05); opacity:1; }
+    100% { transform: translateY(0) scale(1); }
+  }
+
+  /* small helpers */
+  .hidden { display:none; }
+  .center { display:flex; align-items:center; justify-content:center; }
+
+  /* responsive */
+  @media (max-width:520px) {
+    .controls { padding:12px; gap:8px; }
+    #map { height:65vh; min-height:360px; }
+    .mascot { right:10px; bottom:22vh; }
+    body { margin-bottom:48px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Splash screen -->
+<div id="splash" aria-hidden="false">
+  <div class="tiki">
+    <div class="tiki-emoji">🌺</div>
+  </div>
+  <div class="splash-title">
+    <div style="display:flex;flex-direction:column;line-height:1">
+      <div style="font-size:20px;font-weight:900">Tiki Tour</div>
+      <div style="font-size:12px;opacity:0.95">Find a random road. Take a little adventure.</div>
+    </div>
+  </div>
+  <div class="coconut center" style="margin-top:8px">
+    <div style="font-size:20px">🥥</div>
+  </div>
+</div>
+
+<div id="app" class="card" style="max-width:880px;margin:auto">
+
+  <!-- Map -->
+  <div id="map"></div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="input">
+      <label class="small" for="kmInput">Distance km</label>
+      <input id="kmInput" type="number" step="0.1" min="0.1" value="5" aria-label="Distance in kilometers" />
+    </div>
+
+    <button id="pickBtn" class="btn" title="Pick a random drivable road near you">🎯 Pick Random Road</button>
+    <button id="openMapsBtn" class="btn ghost" disabled>🧭 Open in Apple Maps</button>
+    <button id="clearBtn" class="btn ghost">🧹 Clear</button>
+
+    <div id="status" style="margin-left:auto;color:var(--muted);font-size:14px">Waiting for location.</div>
+  </div>
+
+  <div class="stats">
+    <div id="routeInfo" class="pill">No route selected</div>
+    <div style="color:var(--muted);font-size:13px">Pro tip. Add to Home Screen in Safari for app like behavior.</div>
+  </div>
+
+</div>
+
+<!-- Mascot -->
+<div class="mascot" aria-hidden="true">
+  <div class="mascot-bubble">Ready for a Tiki hop?</div>
+  <div class="monkey" id="monkeyEmoji">🐒</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+/*
+ Tiki Tour web app
+ Single file app.
+ Uses OSRM public endpoints for road snapping and routing.
+*/
+
+const splash = document.getElementById('splash');
+const statusEl = document.getElementById('status');
+const kmInput = document.getElementById('kmInput');
+const pickBtn = document.getElementById('pickBtn');
+const openMapsBtn = document.getElementById('openMapsBtn');
+const clearBtn = document.getElementById('clearBtn');
+const routeInfo = document.getElementById('routeInfo');
+const monkey = document.getElementById('monkeyEmoji');
+
+let userCoords = null;
+let userMarker = null;
+let destMarker = null;
+let routeLayer = null;
+let snappedDest = null;
+
+// Initialize map
+const map = L.map('map', { zoomControl: true }).setView([0,0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+// small custom user icon
+const userIcon = L.circleMarker([0,0], { radius:8, fillColor:'#fff', color:'#0b84ff', weight:3, fillOpacity:1 });
+
+// handle splash and initial location
+function hideSplash() {
+  if (!splash) return;
+  splash.style.transition = 'opacity 420ms ease, transform 420ms ease';
+  splash.style.opacity = '0';
+  splash.style.transform = 'scale(0.98)';
+  setTimeout(() => { splash.style.display = 'none'; }, 520);
+}
+
+// get current position once and center map
+function setStatus(txt) {
+  statusEl.textContent = txt || '';
+}
+
+function enableLocation() {
+  if (!navigator.geolocation) {
+    setStatus('Location not supported by browser.');
+    return;
+  }
+  setStatus('Locating you.');
+  navigator.geolocation.getCurrentPosition(pos => {
+    userCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    setStatus('');
+    if (userMarker) userMarker.remove();
+    userMarker = L.marker([userCoords.lat, userCoords.lon], { title: 'You' }).addTo(map);
+    map.setView([userCoords.lat, userCoords.lon], 13, { animate: true });
+    hideSplash();
+  }, err => {
+    setStatus('Allow location in browser and reload.');
+    console.error(err);
+  }, { enableHighAccuracy:true, maximumAge:10000, timeout:10000 });
+}
+enableLocation();
+
+// small periodic update for moving device
+setInterval(() => {
+  if (!document.hidden && navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(pos => {
+      userCoords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      if (userMarker) userMarker.setLatLng([userCoords.lat, userCoords.lon]);
+    }, () => {}, { enableHighAccuracy:true, maximumAge:10000 });
+  }
+}, 8000);
+
+// random coordinate within radius in meters
+function randomCoordinate(centerLat, centerLon, maxMeters) {
+  const R = 6371000;
+  const r = Math.sqrt(Math.random()) * maxMeters;
+  const bearing = Math.random() * Math.PI * 2;
+  const lat1 = centerLat * Math.PI / 180;
+  const lon1 = centerLon * Math.PI / 180;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(r / R) + Math.cos(lat1) * Math.sin(r / R) * Math.cos(bearing));
+  const lon2 = lon1 + Math.atan2(Math.sin(bearing) * Math.sin(r / R) * Math.cos(lat1), Math.cos(r / R) - Math.sin(lat1) * Math.sin(lat2));
+  return { lat: lat2 * 180 / Math.PI, lon: lon2 * 180 / Math.PI };
+}
+
+// OSRM nearest endpoint to snap to road
+async function snapToRoad(lon, lat) {
+  const url = `https://router.project-osrm.org/nearest/v1/driving/${lon},${lat}?number=1`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const j = await res.json();
+    if (j && j.waypoints && j.waypoints.length) {
+      const wp = j.waypoints[0];
+      return { lat: wp.location[1], lon: wp.location[0] };
+    }
+    return null;
+  } catch (e) {
+    console.error('snap error', e);
+    return null;
+  }
+}
+
+// OSRM route endpoint
+async function getRoute(user, dest) {
+  const coords = `${user.lon},${user.lat};${dest.lon},${dest.lat}`;
+  const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const j = await res.json();
+    if (j && j.routes && j.routes.length) return j.routes[0];
+    return null;
+  } catch (e) {
+    console.error('route error', e);
+    return null;
+  }
+}
+
+// show route and marker
+function showRoute(foundRoute, snapped) {
+  // clear old
+  if (destMarker) destMarker.remove();
+  if (routeLayer) routeLayer.remove();
+
+  destMarker = L.marker([snapped.lat, snapped.lon], { title: 'Destination' });
+  destMarker.addTo(map);
+  destMarker._icon.classList.add('drop-pin');
+
+  const coords = foundRoute.geometry.coordinates.map(c => [c[1], c[0]]);
+  routeLayer = L.polyline(coords, { color: '#ff8833', weight:5, opacity:0.95 }).addTo(map);
+
+  // fit bounds with padding
+  const bounds = L.latLngBounds([[userCoords.lat, userCoords.lon],[snapped.lat, snapped.lon]]);
+  map.fitBounds(bounds.pad(0.4), { animate:true, duration:0.9 });
+
+  const distKm = (foundRoute.distance / 1000).toFixed(2);
+  const mins = Math.round(foundRoute.duration / 60);
+  routeInfo.textContent = `Distance ${distKm} km. ETA ${mins} min.`;
+}
+
+// helper to open Apple Maps url
+function appleMapsUrl(from, to) {
+  return `https://maps.apple.com/?saddr=${from.lat},${from.lon}&daddr=${to.lat},${to.lon}&dirflg=d`;
+}
+
+// main pick function
+pickBtn.addEventListener('click', async () => {
+  if (!userCoords) { setStatus('Waiting for location.'); return; }
+  pickBtn.disabled = true;
+  openMapsBtn.disabled = true;
+  setStatus('Searching for a random road.');
+  routeInfo.textContent = 'Searching...';
+  // monkey gets excited
+  monkey.style.transform = 'translateY(-6px) scale(1.08)';
+
+  const km = Math.max(0.1, parseFloat(kmInput.value) || 5);
+  const maxMeters = Math.max(100, km * 1000);
+
+  let foundRoute = null;
+  let foundSnapped = null;
+
+  for (let i = 0; i < 14; i++) {
+    setStatus(`Trying point ${i+1} of 14.`);
+    const cand = randomCoordinate(userCoords.lat, userCoords.lon, maxMeters);
+    const snapped = await snapToRoad(cand.lon, cand.lat);
+    if (!snapped) continue;
+
+    // approximate linear dist to filter extremely close points
+    const dx = (snapped.lat - userCoords.lat);
+    const dy = (snapped.lon - userCoords.lon);
+    const approxDist = Math.sqrt(dx*dx + dy*dy) * 111000;
+    if (approxDist < 30) continue;
+
+    const route = await getRoute(userCoords, snapped);
+    if (route && route.distance > 50) {
+      foundRoute = route;
+      foundSnapped = snapped;
+      break;
+    }
+    await new Promise(r => setTimeout(r, 160));
+  }
+
+  if (!foundRoute) {
+    setStatus('Could not find a drivable road within that radius. Try increasing the distance.');
+    routeInfo.textContent = 'No route found';
+    pickBtn.disabled = false;
+    monkey.style.transform = '';
+    return;
+  }
+
+  snappedDest = foundSnapped;
+  showRoute(foundRoute, snappedDest);
+  setStatus('');
+  pickBtn.disabled = false;
+  openMapsBtn.disabled = false;
+  monkey.style.transform = '';
+});
+
+// open Apple Maps
+openMapsBtn.addEventListener('click', () => {
+  if (!userCoords || !snappedDest) return;
+  const url = appleMapsUrl(userCoords, snappedDest);
+  // On iPhone Safari this will open the Apple Maps app
+  window.location.href = url;
+});
+
+// clear
+clearBtn.addEventListener('click', () => {
+  if (destMarker) destMarker.remove();
+  if (routeLayer) routeLayer.remove();
+  destMarker = null; routeLayer = null; snappedDest = null;
+  routeInfo.textContent = 'No route selected';
+});
+
+// small entry animation for logo removal after map loads
+setTimeout(() => {
+  // if user permission is already granted then splash may hide after location is set
+  // otherwise hide splash after short delay so user sees intro
+  if (splash) {
+    setTimeout(() => {
+      splash.style.opacity = '0';
+      splash.style.transform = 'scale(0.98)';
+      setTimeout(()=> { if(splash) splash.remove(); }, 520);
+    }, 1100);
+  }
+}, 1200);
+
+// Accessibility note. Allow keyboard activation on monkey bubble for fun
+document.querySelector('.mascot-bubble').addEventListener('click', () => {
+  // quick wiggle
+  monkey.style.transition = 'transform 220ms';
+  monkey.style.transform = 'translateY(-10px) rotate(-8deg)';
+  setTimeout(()=> monkey.style.transform = '', 420);
+});
+</script>
+
+</body>
+</html>
